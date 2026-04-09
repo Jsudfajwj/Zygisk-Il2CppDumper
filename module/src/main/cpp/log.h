@@ -7,10 +7,17 @@
 
 #include <android/log.h>
 
-#define LOG_TAG "Perfare"
+#ifdef NDEBUG
+#define LOGD(...)
+#define LOGW(...)
+#define LOGE(...)
+#define LOGI(...)
+#else
+#define LOG_TAG "Zygisk-Dumper"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#endif
 
 #endif //ZYGISK_IL2CPPDUMPER_LOG_H

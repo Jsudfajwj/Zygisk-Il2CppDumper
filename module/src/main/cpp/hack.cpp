@@ -17,21 +17,41 @@
 #include <linux/unistd.h>
 #include <array>
 
+#include <random>
+#include <chrono>
+#include <sys/prctl.h>
+
+void set_thread_name(const char* name) {
+    prctl(PR_SET_NAME, name, 0, 0, 0);
+}
+
 void hack_start(const char *game_data_dir) {
+    // Set a common thread name to blend in
+    set_thread_name("UnityMain");
+
+    // Add a random delay to avoid simple timing detection
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(5, 15);
+    int delay = dis(gen);
+    LOGI("Stealth delay: %d seconds before dumping...", delay);
+    sleep(delay);
+
     bool load = false;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 30; i++) {
         void *handle = xdl_open("libil2cpp.so", 0);
         if (handle) {
             load = true;
             il2cpp_api_init(handle);
+            LOGI("Found libil2cpp.so, starting dump...");
             il2cpp_dump(game_data_dir);
             break;
         } else {
-            sleep(1);
+            sleep(2);
         }
     }
     if (!load) {
-        LOGI("libil2cpp.so not found in thread %d", gettid());
+        LOGE("libil2cpp.so not found in thread %d", gettid());
     }
 }
 

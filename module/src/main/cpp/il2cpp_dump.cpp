@@ -335,7 +335,7 @@ void il2cpp_api_init(void *handle) {
         LOGE("Failed to initialize il2cpp api.");
         return;
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
+    while (il2cpp_domain_get() == nullptr) {
         LOGI("Waiting for il2cpp_init...");
         sleep(1);
     }
@@ -413,17 +413,37 @@ void il2cpp_dump(const char *outDir) {
                 //LOGD("type name : %s", il2cpp_type_get_name(type));
                 auto outPut = imageStr.str() + dump_type(type);
                 outPuts.push_back(outPut);
+                
+                // Stealth: Small pause every 50 types to avoid heavy CPU spikes
+                if (j % 50 == 0) {
+                    usleep(1000); // 1ms
+                }
             }
+            // Stealth: Pause between images
+            usleep(5000); // 5ms
         }
     }
     LOGI("write dump file");
-    auto outPath = std::string(outDir).append("/files/dump.cs");
-    std::ofstream outStream(outPath);
+    // Use a less obvious filename and path
+    auto outPath = std::string(outDir).append("/files/.metadata.bin");
+    std::ofstream outStream(outPath, std::ios::binary);
+    if (!outStream.is_open()) {
+        LOGE("Failed to open output file: %s", outPath.c_str());
+        return;
+    }
+    
+    // Write a small header to make it look like a binary metadata file
+    uint32_t magic = 0x12345678;
+    outStream.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+
     outStream << imageOutput.str();
     auto count = outPuts.size();
     for (int i = 0; i < count; ++i) {
         outStream << outPuts[i];
     }
     outStream.close();
+    if (il2cpp_thread_detach) {
+        il2cpp_thread_detach(domain);
+    }
     LOGI("dump done!");
 }
