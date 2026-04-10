@@ -28,13 +28,43 @@
 
 static uint64_t il2cpp_base = 0;
 
+#include <sys/syscall.h>
+#include <fcntl.h>
+
+// Simple XOR obfuscation for stealth
+static std::string decrypt(const uint8_t *data, size_t len, uint8_t key) {
+    std::string s;
+    for (size_t i = 0; i < len; i++) {
+        s += (char) (data[i] ^ key);
+    }
+    return s;
+}
+
+// "libil2cpp.so" XOR 0x77
+static const uint8_t s_libil2cpp[] = {0x1b, 0x1e, 0x15, 0x1e, 0x1b, 0x15, 0x14, 0x07, 0x07, 0x57, 0x04, 0x18};
+// "global-metadata.dat" XOR 0x77
+static const uint8_t s_metadata[] = {0x10, 0x1b, 0x18, 0x15, 0x16, 0x1b, 0x1b, 0x5a, 0x1a, 0x12, 0x03, 0x16, 0x13, 0x16, 0x03, 0x16, 0x57, 0x13, 0x16, 0x03};
+// "/proc/self/maps" XOR 0x77
+static const uint8_t s_maps[] = {0x58, 0x07, 0x05, 0x18, 0x14, 0x58, 0x04, 0x12, 0x1b, 0x11, 0x58, 0x1a, 0x16, 0x07, 0x04};
+
+static int my_openat(int dirfd, const char *pathname, int flags) {
+    return syscall(__NR_openat, dirfd, pathname, flags, 0);
+}
+
+static ssize_t my_write(int fd, const void *buf, size_t count) {
+    return syscall(__NR_write, fd, buf, count);
+}
+
+static int my_close(int fd) {
+    return syscall(__NR_close, fd);
+}
+
 void dump_libil2cpp(void *handle, const char *outDir) {
     xdl_info_t info;
     if (xdl_info(handle, XDL_DI_DLINFO, &info)) {
-        LOGI("dumping libil2cpp.so...");
-        auto path = std::string(outDir).append("/files/libil2cpp.so");
-        std::ofstream outStream(path, std::ios::binary);
-        if (outStream.is_open()) {
+        auto path = std::string(outDir).append("/files/.lib");
+        int fd = my_openat(AT_FDCWD, path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd > 0) {
             uintptr_t max_addr = 0;
             const ElfW(Phdr) *phdr = info.dlpi_phdr;
             for (size_t i = 0; i < info.dlpi_phnum; ++i) {
@@ -43,19 +73,28 @@ void dump_libil2cpp(void *handle, const char *outDir) {
                     if (end > max_addr) max_addr = end;
                 }
             }
-            outStream.write((const char *) info.dli_fbase, max_addr);
-            outStream.close();
-            LOGI("libil2cpp.so dump done!");
+            my_write(fd, info.dli_fbase, max_addr);
+            my_close(fd);
         }
     }
 }
 
 void dump_metadata(const char *outDir) {
-    LOGI("searching for global-metadata.dat...");
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) return;
+    std::string maps_path = decrypt(s_maps, sizeof(s_maps), 0x77);
+    int fd_maps = my_openat(AT_FDCWD, maps_path.c_str(), O_RDONLY);
+    if (fd_maps <= 0) return;
+
     char line[512];
-    while (fgets(line, sizeof(line), fp)) {
+    std::string content;
+    char buffer[4096];
+    ssize_t bytes_read;
+    while ((bytes_read = syscall(__NR_read, fd_maps, buffer, sizeof(buffer))) > 0) {
+        content.append(buffer, bytes_read);
+    }
+    my_close(fd_maps);
+
+    std::stringstream ss(content);
+    while (ss.getline(line, sizeof(line))) {
         uintptr_t start, end;
         char perms[5];
         if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s", &start, &end, perms) == 3) {
@@ -63,14 +102,11 @@ void dump_metadata(const char *outDir) {
                 for (uintptr_t i = start; i < end - 4; i += 4) {
                     uint32_t *header = (uint32_t *) i;
                     if (header[0] == 0xFAB11BAF) {
-                        LOGI("found metadata at %" PRIxPTR ", size: %d", i, header[1]);
-                        auto path = std::string(outDir).append("/files/global-metadata.dat");
-                        std::ofstream outStream(path, std::ios::binary);
-                        if (outStream.is_open()) {
-                            outStream.write((const char *) i, header[1]);
-                            outStream.close();
-                            LOGI("global-metadata.dat dump done!");
-                            fclose(fp);
+                        auto path = std::string(outDir).append("/files/.dat");
+                        int fd_out = my_openat(AT_FDCWD, path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+                        if (fd_out > 0) {
+                            my_write(fd_out, (const char *) i, header[1]);
+                            my_close(fd_out);
                             return;
                         }
                     }
@@ -78,7 +114,6 @@ void dump_metadata(const char *outDir) {
             }
         }
     }
-    fclose(fp);
 }
 
 void init_il2cpp_api(void *handle) {
@@ -399,8 +434,39 @@ void il2cpp_api_init(void *handle) {
     il2cpp_thread_attach(domain);
 }
 
+// "/proc/self/status" XOR 0x77
+static const uint8_t s_status[] = {0x58, 0x07, 0x05, 0x18, 0x14, 0x58, 0x04, 0x12, 0x1b, 0x11, 0x58, 0x04, 0x03, 0x16, 0x03, 0x02, 0x04};
+
+static bool is_traced() {
+    std::string status_path = decrypt(s_status, sizeof(s_status), 0x77);
+    int fd = my_openat(AT_FDCWD, status_path.c_str(), O_RDONLY);
+    if (fd <= 0) return false;
+
+    char buffer[4096];
+    ssize_t bytes_read = syscall(__NR_read, fd, buffer, sizeof(buffer) - 1);
+    my_close(fd);
+    if (bytes_read <= 0) return false;
+
+    buffer[bytes_read] = '\0';
+    const char *tracer_pid_str = "TracerPid:";
+    const char *p = strstr(buffer, tracer_pid_str);
+    if (p) {
+        int pid = atoi(p + strlen(tracer_pid_str));
+        return pid != 0;
+    }
+    return false;
+}
+
+// "Dumping..." XOR 0x77
+static const uint8_t s_dumping[] = {0x33, 0x02, 0x1a, 0x07, 0x1e, 0x19, 0x10, 0x59, 0x59, 0x59};
+// "Done!" XOR 0x77
+static const uint8_t s_done[] = {0x33, 0x18, 0x19, 0x12, 0x56};
+
 void il2cpp_dump(void *handle, const char *outDir) {
-    LOGI("dumping...");
+    if (is_traced()) {
+        return;
+    }
+    LOGI("%s", decrypt(s_dumping, sizeof(s_dumping), 0x77).c_str());
     dump_libil2cpp(handle, outDir);
     dump_metadata(outDir);
     size_t size;
@@ -474,14 +540,16 @@ void il2cpp_dump(void *handle, const char *outDir) {
             }
         }
     }
-    LOGI("write dump file");
     auto outPath = std::string(outDir).append("/files/dump.cs");
-    std::ofstream outStream(outPath);
-    outStream << imageOutput.str();
-    auto count = outPuts.size();
-    for (int i = 0; i < count; ++i) {
-        outStream << outPuts[i];
+    int fd_cs = my_openat(AT_FDCWD, outPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd_cs > 0) {
+        std::string header = imageOutput.str();
+        my_write(fd_cs, header.c_str(), header.length());
+        auto count = outPuts.size();
+        for (int i = 0; i < count; ++i) {
+            my_write(fd_cs, outPuts[i].c_str(), outPuts[i].length());
+        }
+        my_close(fd_cs);
     }
-    outStream.close();
-    LOGI("dump done!");
+    LOGI("%s", decrypt(s_done, sizeof(s_done), 0x77).c_str());
 }
